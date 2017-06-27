@@ -44,7 +44,7 @@ public:
              FrameTimestamps* outTimestamps);
 
 protected:
-     static constexpr size_t MAX_FRAME_HISTORY = 8;
+     static constexpr size_t MAX_FRAME_HISTORY = 128;
 
      struct LayerRecord {
          String8 name; // layer name

@@ -270,6 +270,7 @@ public:
         float xdpi;
         float ydpi;
         nsecs_t refresh;
+	int colorTransform;
         android_color_mode_t colorMode;
         bool operator==(const DisplayConfig& rhs) const {
             return width == rhs.width &&

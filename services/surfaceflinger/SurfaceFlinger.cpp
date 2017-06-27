@@ -162,6 +162,7 @@ SurfaceFlinger::SurfaceFlinger()
         mPrimaryDispSync("PrimaryDispSync"),
         mPrimaryHWVsyncEnabled(false),
         mHWVsyncAvailable(false),
+        mDaltonize(false),
         mHasColorMatrix(false),
         mHasPoweredOff(false),
         mFrameBuckets(),
@@ -176,6 +177,9 @@ SurfaceFlinger::SurfaceFlinger()
 
     property_get("ro.bq.gpu_to_cpu_unsupported", value, "0");
     mGpuToCpuSupported = !atoi(value);
+
+    property_get("debug.sf.drop_missed_frames", value, "0");
+    mDropMissedFrames = atoi(value);
 
     property_get("debug.sf.showupdates", value, "0");
     mDebugRegion = atoi(value);
@@ -624,6 +628,11 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             // TODO: this needs to go away (currently needed only by webkit)
             sp<const DisplayDevice> hw(getDefaultDisplayDevice());
             info.orientation = hw->getOrientation();
+            char valuef[PROPERTY_VALUE_MAX];
+            property_get("ro.sf.xdpi", valuef, "0");
+            xdpi = atof(valuef);
+            property_get("ro.sf.ydpi", valuef, "0");
+            ydpi = atof(valuef);
         } else {
             // TODO: where should this value come from?
             static const int TV_DENSITY = 213;
@@ -648,6 +657,9 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
         }
         info.fps = 1e9 / hwConfig->getVsyncPeriod();
         info.appVsyncOffset = VSYNC_EVENT_PHASE_OFFSET_NS;
+
+        // TODO: Hook this back up
+        info.colorTransform = 0;
 
         // This is how far in advance a buffer must be queued for
         // presentation at a given time.  If you want a buffer to appear
@@ -1098,7 +1110,11 @@ bool SurfaceFlinger::handleMessageInvalidate() {
 void SurfaceFlinger::handleMessageRefresh() {
     ATRACE_CALL();
 
+#ifdef ENABLE_FENCE_TRACKING
     nsecs_t refreshStartTime = systemTime(SYSTEM_TIME_MONOTONIC);
+#else
+    nsecs_t refreshStartTime = 0;
+#endif
 
     preComposition();
     rebuildLayerStacks();
@@ -1109,6 +1125,28 @@ void SurfaceFlinger::handleMessageRefresh() {
 #ifdef USES_HWC_SERVICES
     notifyPSRExit = true;
 #endif
+    static nsecs_t previousExpectedPresent = 0;
+    nsecs_t expectedPresent = mPrimaryDispSync.computeNextRefresh(0);
+    static bool previousFrameMissed = false;
+    bool frameMissed = (expectedPresent == previousExpectedPresent);
+    if (frameMissed != previousFrameMissed) {
+        ATRACE_INT("FrameMissed", static_cast<int>(frameMissed));
+    }
+    previousFrameMissed = frameMissed;
+
+    if (CC_UNLIKELY(mDropMissedFrames && frameMissed)) {
+        // Latch buffers, but don't send anything to HWC, then signal another
+        // wakeup for the next vsync
+        preComposition();
+        repaintEverything();
+    } else {
+        preComposition();
+        rebuildLayerStacks();
+        setUpHWComposer();
+        doDebugFlashRegions();
+        doComposition();
+        postComposition(refreshStartTime);
+    }
 
     mPreviousPresentFence = mHwc->getRetireFence(HWC_DISPLAY_PRIMARY);
 
@@ -1124,6 +1162,8 @@ void SurfaceFlinger::handleMessageRefresh() {
         layer->releasePendingBuffer();
     }
     mLayersWithQueuedFrames.clear();
+
+    previousExpectedPresent = mPrimaryDispSync.computeNextRefresh(0);
 }
 
 void SurfaceFlinger::doDebugFlashRegions()
@@ -1188,7 +1228,11 @@ void SurfaceFlinger::preComposition()
     }
 }
 
+#ifdef ENABLE_FENCE_TRACKING
 void SurfaceFlinger::postComposition(nsecs_t refreshStartTime)
+#else
+void SurfaceFlinger::postComposition(nsecs_t /*refreshStartTime*/)
+#endif
 {
     ATRACE_CALL();
     ALOGV("postComposition");
@@ -1220,8 +1264,10 @@ void SurfaceFlinger::postComposition(nsecs_t refreshStartTime)
         }
     }
 
+#ifdef ENABLE_FENCE_TRACKING
     mFenceTracker.addFrame(refreshStartTime, presentFence,
             hw->getVisibleLayersSortedByZ(), hw->getClientTargetAcquireFence());
+#endif
 
     if (mAnimCompositionPending) {
         mAnimCompositionPending = false;
@@ -1366,7 +1412,8 @@ void SurfaceFlinger::setUpHWComposer() {
                     }
 
                     layer->setGeometry(displayDevice);
-                    if (mDebugDisableHWC || mDebugRegion) {
+                    if (mDebugDisableHWC || mDebugRegion || mDaltonize ||
+                            mHasColorMatrix) {
                         layer->forceClientComposition(hwcId);
                     }
                 }
@@ -2082,7 +2129,18 @@ void SurfaceFlinger::doDisplayComposition(const sp<const DisplayDevice>& hw,
         }
     }
 
-    if (!doComposeSurfaces(hw, dirtyRegion)) return;
+    if (CC_LIKELY(!mDaltonize && !mHasColorMatrix)) {
+        if (!doComposeSurfaces(hw, dirtyRegion)) return;
+    } else {
+        RenderEngine& engine(getRenderEngine());
+        mat4 colorMatrix = mColorMatrix;
+        if (mDaltonize) {
+            colorMatrix = colorMatrix * mDaltonizer();
+        }
+        mat4 oldMatrix = engine.setupColorTransform(colorMatrix);
+        doComposeSurfaces(hw, dirtyRegion);
+        engine.setupColorTransform(oldMatrix);
+    }
 
     // update the swap region and clear the dirty region
     hw->swapRegion.orSelf(dirtyRegion);
@@ -2657,7 +2715,14 @@ status_t SurfaceFlinger::onLayerDestroyed(const wp<Layer>& layer)
 {
     // called by ~LayerCleaner() when all references to the IBinder (handle)
     // are gone
-    return removeLayer(layer);
+    status_t err = NO_ERROR;
+    sp<Layer> l(layer.promote());
+    if (l != NULL) {
+        err = removeLayer(l);
+        ALOGE_IF(err<0 && err != NAME_NOT_FOUND,
+                "error removing layer=%p (%s)", l.get(), strerror(-err));
+    }
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -2848,12 +2913,14 @@ status_t SurfaceFlinger::dump(int fd, const Vector<String16>& args)
                 dumpAll = false;
             }
 
+#ifdef ENABLE_FENCE_TRACKING
             if ((index < numArgs) &&
                     (args[index] == String16("--fences"))) {
                 index++;
                 mFenceTracker.dump(&result);
                 dumpAll = false;
             }
+#endif
         }
 
         if (dumpAll) {
@@ -3184,7 +3251,8 @@ void SurfaceFlinger::dumpAllLocked(const Vector<String16>& args, size_t& index,
     colorizer.bold(result);
     result.append("h/w composer state:\n");
     colorizer.reset(result);
-    bool hwcDisabled = mDebugDisableHWC || mDebugRegion;
+    bool hwcDisabled = mDebugDisableHWC || mDebugRegion || mDaltonize ||
+            mHasColorMatrix;
     result.appendFormat("  h/w composer %s\n",
             hwcDisabled ? "disabled" : "enabled");
     hwc.dump(result);
@@ -3357,6 +3425,7 @@ status_t SurfaceFlinger::onTransact(
                 } else {
                     mDaltonizer.setMode(ColorBlindnessMode::Simulation);
                 }
+                mDaltonize = n > 0;
                 invalidateHwcGeometry();
                 repaintEverything();
                 return NO_ERROR;
@@ -3364,6 +3433,7 @@ status_t SurfaceFlinger::onTransact(
             case 1015: {
                 // apply a color matrix
                 n = data.readInt32();
+                mHasColorMatrix = n ? 1 : 0;
                 if (n) {
                     // color matrix is sent as mat3 matrix followed by vec3
                     // offset, then packed into a mat4 where the last row is

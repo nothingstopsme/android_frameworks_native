@@ -47,6 +47,8 @@
 #include "SurfaceFlinger.h"
 #include "Layer.h"
 
+#include "SprdConfigChoose.h"
+
 // ----------------------------------------------------------------------------
 using namespace android;
 // ----------------------------------------------------------------------------
@@ -121,7 +123,14 @@ DisplayDevice::DisplayDevice(
         config = RenderEngine::chooseEglConfig(display, format);
 #endif
     }
+        /*
+     *  Sprd change here:
+     *  Enable EGL NV12 config for GPU output NV12 image, for
+     *  VirtualDisplay.
+     * */
+    getSPRDWindowSurfaceConfig(display, mType, &config);
     eglSurface = eglCreateWindowSurface(display, config, window, NULL);
+    format = getSPRDFBFormat(window, producer, mType);
     eglQuerySurface(display, eglSurface, EGL_WIDTH,  &mDisplayWidth);
     eglQuerySurface(display, eglSurface, EGL_HEIGHT, &mDisplayHeight);
 

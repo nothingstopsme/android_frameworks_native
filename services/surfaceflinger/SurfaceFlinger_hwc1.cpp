@@ -182,6 +182,9 @@ SurfaceFlinger::SurfaceFlinger()
     property_get("ro.bq.gpu_to_cpu_unsupported", value, "0");
     mGpuToCpuSupported = !atoi(value);
 
+    property_get("debug.sf.drop_missed_frames", value, "0");
+    mDropMissedFrames = atoi(value);
+
     property_get("debug.sf.showupdates", value, "0");
     mDebugRegion = atoi(value);
 
@@ -479,7 +482,7 @@ void SurfaceFlinger::init() {
                 sfVsyncPhaseOffsetNs, true, "sf");
         mSFEventThread = new EventThread(sfVsyncSrc, *this);
         mEventQueue.setEventThread(mSFEventThread);
-		
+
        // set SFEventThread to SCHED_FIFO to minimize jitter
        struct sched_param param = {0};
        param.sched_priority = 2;
@@ -491,7 +494,7 @@ void SurfaceFlinger::init() {
                          vsyncPhaseOffsetNs, true, "sf-app");
         mEventThread = new EventThread(vsyncSrc, *this);
         mEventQueue.setEventThread(mEventThread);
-		
+
        // set EventThread to SCHED_FIFO to minimize jitter
        struct sched_param param = {0};
        param.sched_priority = 2;
@@ -614,8 +617,20 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
         return BAD_VALUE;
     }
 
-    int32_t type = getDisplayType(display);
-    if (type < 0) return type;
+    if (!display.get())
+        return NAME_NOT_FOUND;
+
+    int32_t type = NAME_NOT_FOUND;
+    for (int i=0 ; i<DisplayDevice::NUM_BUILTIN_DISPLAY_TYPES ; i++) {
+        if (display == mBuiltinDisplays[i]) {
+            type = i;
+            break;
+        }
+    }
+
+    if (type < 0) {
+        return type;
+    }
 
     // TODO: Not sure if display density should handled by SF any longer
     class Density {
@@ -664,6 +679,12 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
             // TODO: this needs to go away (currently needed only by webkit)
             sp<const DisplayDevice> hw(getDefaultDisplayDevice());
             info.orientation = hw->getOrientation();
+
+            char valuef[PROPERTY_VALUE_MAX];
+            property_get("ro.sf.xdpi", valuef, "0");
+            xdpi = atof(valuef);
+            property_get("ro.sf.ydpi", valuef, "0");
+            ydpi = atof(valuef);
         } else {
             // TODO: where should this value come from?
             static const int TV_DENSITY = 213;
@@ -688,6 +709,7 @@ status_t SurfaceFlinger::getDisplayConfigs(const sp<IBinder>& display,
         }
         info.fps = float(1e9 / hwConfig.refresh);
         info.appVsyncOffset = VSYNC_EVENT_PHASE_OFFSET_NS;
+        info.colorTransform = hwConfig.colorTransform;
 
         // This is how far in advance a buffer must be queued for
         // presentation at a given time.  If you want a buffer to appear
@@ -1085,14 +1107,35 @@ bool SurfaceFlinger::handleMessageInvalidate() {
 void SurfaceFlinger::handleMessageRefresh() {
     ATRACE_CALL();
 
+#ifdef ENABLE_FENCE_TRACKING
     nsecs_t refreshStartTime = systemTime(SYSTEM_TIME_MONOTONIC);
+#else
+    nsecs_t refreshStartTime = 0;
+#endif
+    static nsecs_t previousExpectedPresent = 0;
+    nsecs_t expectedPresent = mPrimaryDispSync.computeNextRefresh(0);
+    static bool previousFrameMissed = false;
+    bool frameMissed = (expectedPresent == previousExpectedPresent);
+    if (frameMissed != previousFrameMissed) {
+        ATRACE_INT("FrameMissed", static_cast<int>(frameMissed));
+    }
+    previousFrameMissed = frameMissed;
 
-    preComposition();
-    rebuildLayerStacks();
-    setUpHWComposer();
-    doDebugFlashRegions();
-    doComposition();
-    postComposition(refreshStartTime);
+    if (CC_UNLIKELY(mDropMissedFrames && frameMissed)) {
+        // Latch buffers, but don't send anything to HWC, then signal another
+        // wakeup for the next vsync
+        preComposition();
+        repaintEverything();
+    } else {
+        preComposition();
+        rebuildLayerStacks();
+        setUpHWComposer();
+        doDebugFlashRegions();
+        doComposition();
+        postComposition(refreshStartTime);
+    }
+
+    previousExpectedPresent = mPrimaryDispSync.computeNextRefresh(0);
 }
 
 void SurfaceFlinger::doDebugFlashRegions()
@@ -1150,7 +1193,11 @@ void SurfaceFlinger::preComposition()
     }
 }
 
+#ifdef ENABLE_FENCE_TRACKING
 void SurfaceFlinger::postComposition(nsecs_t refreshStartTime)
+#else
+void SurfaceFlinger::postComposition(nsecs_t /*refreshStartTime*/)
+#endif
 {
     const LayerVector& layers(mDrawingState.layersSortedByZ);
     const size_t count = layers.size();
@@ -1180,8 +1227,10 @@ void SurfaceFlinger::postComposition(nsecs_t refreshStartTime)
         }
     }
 
+#ifdef ENABLE_FENCE_TRACKING
     mFenceTracker.addFrame(refreshStartTime, presentFence,
             hw->getVisibleLayersSortedByZ(), hw->getClientTargetAcquireFence());
+#endif
 
     if (mAnimCompositionPending) {
         mAnimCompositionPending = false;
@@ -1243,7 +1292,8 @@ void SurfaceFlinger::rebuildLayerStacks() {
                 const size_t count = layers.size();
                 for (size_t i=0 ; i<count ; i++) {
                     const sp<Layer>& layer(layers[i]);
-                    {
+                    const Layer::State& s(layer->getDrawingState());
+                    if (s.layerStack == hw->getLayerStack()) {
                         Region drawRegion(tr.transform(
                                 layer->visibleNonTransparentRegion));
                         drawRegion.andSelf(bounds);
@@ -2655,7 +2705,14 @@ status_t SurfaceFlinger::onLayerDestroyed(const wp<Layer>& layer)
 {
     // called by ~LayerCleaner() when all references to the IBinder (handle)
     // are gone
-    return removeLayer(layer);
+    status_t err = NO_ERROR;
+    sp<Layer> l(layer.promote());
+    if (l != NULL) {
+        err = removeLayer(l);
+        ALOGE_IF(err<0 && err != NAME_NOT_FOUND,
+                "error removing layer=%p (%s)", l.get(), strerror(-err));
+    }
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -2846,12 +2903,14 @@ status_t SurfaceFlinger::dump(int fd, const Vector<String16>& args)
                 dumpAll = false;
             }
 
+#ifdef ENABLE_FENCE_TRACKING
             if ((index < numArgs) &&
                     (args[index] == String16("--fences"))) {
                 index++;
                 mFenceTracker.dump(&result);
                 dumpAll = false;
             }
+#endif
         }
 
         if (dumpAll) {

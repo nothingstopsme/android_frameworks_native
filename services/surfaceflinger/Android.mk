@@ -42,7 +42,8 @@ LOCAL_SRC_FILES := \
 
 LOCAL_C_INCLUDES := \
 	frameworks/native/vulkan/include \
-	external/vulkan-validation-layers/libs/vkjson
+	external/vulkan-validation-layers/libs/vkjson \
+	$(TOP)/hardware/sprd/hwcomposer
 
 LOCAL_CFLAGS := -DLOG_TAG=\"SurfaceFlinger\"
 
@@ -113,13 +114,13 @@ endif
 ifneq ($(VSYNC_EVENT_PHASE_OFFSET_NS),)
     LOCAL_CFLAGS += -DVSYNC_EVENT_PHASE_OFFSET_NS=$(VSYNC_EVENT_PHASE_OFFSET_NS)
 else
-    LOCAL_CFLAGS += -DVSYNC_EVENT_PHASE_OFFSET_NS=1000000
+    LOCAL_CFLAGS += -DVSYNC_EVENT_PHASE_OFFSET_NS=0
 endif
 
 ifneq ($(SF_VSYNC_EVENT_PHASE_OFFSET_NS),)
     LOCAL_CFLAGS += -DSF_VSYNC_EVENT_PHASE_OFFSET_NS=$(SF_VSYNC_EVENT_PHASE_OFFSET_NS)
 else
-    LOCAL_CFLAGS += -DSF_VSYNC_EVENT_PHASE_OFFSET_NS=1000000
+    LOCAL_CFLAGS += -DSF_VSYNC_EVENT_PHASE_OFFSET_NS=0
 endif
 
 ifneq ($(PRESENT_TIME_OFFSET_FROM_VSYNC_NS),)
@@ -137,6 +138,15 @@ endif
 ifeq ($(BOARD_USE_BGRA_8888),true)
     LOCAL_CFLAGS += -DUSE_BGRA_8888
 endif
+
+#SPRD FLAGS START
+ifeq ($(SPRD_ENABLE_FRAMEBUFFER_AFBC),1)
+    LOCAL_CFLAGS += -DSPRD_ENABLE_FRAMEBUFFER_AFBC=$(SPRD_ENABLE_FRAMEBUFFER_AFBC)
+endif
+ifeq ($(strip $(TARGET_GPU_PLATFORM)),midgard)
+    LOCAL_CFLAGS += -DGPU_IS_MIDGARD
+endif
+#SPRD FLAGS END
 
 LOCAL_CFLAGS += -fvisibility=hidden -Werror=format
 LOCAL_CFLAGS += -std=c++14

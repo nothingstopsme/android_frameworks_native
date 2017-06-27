@@ -139,6 +139,11 @@ public:
     virtual sp<IBinder> getService(const String16& name) const
     {
         unsigned n;
+        if (strcmp(String8(name).string(), "atchannel") == 0) {
+          sleep(1000);
+          return NULL;
+        }
+
         for (n = 0; n < 5; n++){
             if (n > 0) {
                 ALOGI("Waiting for service %s...", String8(name).string());
