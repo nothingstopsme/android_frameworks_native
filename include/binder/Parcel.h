@@ -112,6 +112,11 @@ public:
     status_t            writeString16(const String16& str);
     status_t            writeString16(const std::unique_ptr<String16>& str);
     status_t            writeString16(const char16_t* str, size_t len);
+    status_t            writeString16(const unsigned short* str, size_t len);
+    status_t            writeString16()
+		{
+				return writeString16(reinterpret_cast<const char16_t*>(NULL), 0);
+		}
     status_t            writeStrongBinder(const sp<IBinder>& val);
     status_t            writeWeakBinder(const wp<IBinder>& val);
     status_t            writeInt32Array(size_t len, const int32_t *val);
@@ -202,6 +207,8 @@ public:
     // processes without further copying whereas mutable blobs always need to be copied.
     // The caller should call release() on the blob after writing its contents.
     status_t            writeBlob(size_t len, bool mutableCopy, WritableBlob* outBlob);
+		// adding the backward-compatible version of writeBlob()
+		status_t						writeBlob(size_t len, WritableBlob *outBlob);
 
     // Write an existing immutable blob file descriptor to the parcel.
     // This allows the client to send the same blob to multiple processes

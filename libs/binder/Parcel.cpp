@@ -1083,6 +1083,11 @@ status_t Parcel::writeString16(const String16& str)
     return writeString16(str.string(), str.size());
 }
 
+status_t Parcel::writeString16(const unsigned short* str, size_t len)
+{
+		return writeString16(reinterpret_cast<const char16_t*>(str), len);
+}
+
 status_t Parcel::writeString16(const char16_t* str, size_t len)
 {
     if (str == NULL) return writeInt32(-1);
@@ -1202,6 +1207,11 @@ status_t Parcel::writeUniqueFileDescriptorVector(const std::vector<ScopedFd>& va
 
 status_t Parcel::writeUniqueFileDescriptorVector(const std::unique_ptr<std::vector<ScopedFd>>& val) {
     return writeNullableTypedVector(val, &Parcel::writeUniqueFileDescriptor);
+}
+
+status_t Parcel::writeBlob(size_t len, WritableBlob *outBlob)
+{
+		return writeBlob(len, false, outBlob);
 }
 
 status_t Parcel::writeBlob(size_t len, bool mutableCopy, WritableBlob* outBlob)
